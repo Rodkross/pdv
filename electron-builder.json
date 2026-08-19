@@ -1,0 +1,35 @@
+{
+  "appId": "com.suaempresa.pdvorcamento",
+  "productName": "PDV Orcamento Balcao",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "dist-electron/**/*",
+    "package.json"
+  ],
+  "extraResources": [
+    {
+      "from": "electron/assets",
+      "to": "assets",
+      "filter": ["**/*"]
+    }
+  ],
+  "win": {
+    "target": [
+      { "target": "nsis", "arch": ["x64"] }
+    ],
+    "icon": "electron/assets/icon.ico"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "PDV Orcamento Balcao"
+  },
+  "asarUnpack": [
+    "**/node_modules/better-sqlite3/**"
+  ]
+}
