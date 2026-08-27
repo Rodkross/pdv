@@ -16,6 +16,8 @@ import {
   PrecoResolvido,
   TipoOperacao,
   Usuario,
+  ConfigFilial,
+  PagamentoOrcamento,
 } from '../types';
 
 interface SalesContextValue {
@@ -58,11 +60,6 @@ interface SalesContextValue {
   // Modalidade e Pagamento
   modalidade: TipoOperacao;
   setModalidade: (t: TipoOperacao) => void;
-  formaPagamento: string;
-  setFormaPagamento: (v: string) => void;
-  valorPago: string;
-  setValorPago: (v: string) => void;
-  trocoCalculado: number;
 
   // Dados do cliente da entrega (nome, telefone, CPF, endereço)
   clienteEntregaNome: string;
@@ -78,6 +75,14 @@ interface SalesContextValue {
   impressoraSelecionada: string;
   setImpressoraSelecionada: (v: string) => void;
   impressorasDisponiveis: InfoImpressora[];
+  recarregarImpressoras: () => Promise<void>;
+
+  // Contador de cestas do dia (reinicia sozinho à meia-noite)
+  cestasHoje: number;
+
+  // Dados da filial (nome/endereço/CNPJ/telefone) exibidos no cupom
+  configFilial: ConfigFilial;
+  recarregarConfigFilial: () => Promise<void>;
 
   // Modal de confirmação de fechamento (aberto por F12 ou pelo botão "Fechar Venda")
   modalFechamentoAberto: boolean;
@@ -89,9 +94,7 @@ interface SalesContextValue {
   ultimoOrcamento: OrcamentoCompleto | null;
   erroFechamento: string | null;
   fecharVenda: (
-    formaPagto?: string,
-    valPago?: number,
-    trocoCalc?: number,
+    pagamentos: PagamentoOrcamento[],
     nomeImpressora?: string
   ) => Promise<void>;
   limparUltimoOrcamento: () => void;
@@ -135,8 +138,6 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [carregandoUsuarios, setCarregandoUsuarios] = useState(false);
 
   const [modalidade, setModalidade] = useState<TipoOperacao>('CESTA');
-  const [formaPagamento, setFormaPagamento] = useState('DINHEIRO');
-  const [valorPago, setValorPago] = useState('');
 
   const [clienteEntregaNome, setClienteEntregaNome] = useState('');
   const [clienteEntregaTelefone, setClienteEntregaTelefone] = useState('');
@@ -145,6 +146,13 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const [impressoraSelecionada, setImpressoraSelecionada] = useState('');
   const [impressorasDisponiveis, setImpressorasDisponiveis] = useState<InfoImpressora[]>([]);
+  const [cestasHoje, setCestasHoje] = useState(0);
+  const [configFilial, setConfigFilial] = useState<ConfigFilial>({
+    nome: '',
+    endereco: '',
+    cnpj: '',
+    telefone: '',
+  });
 
   const [modalFechamentoAberto, setModalFechamentoAberto] = useState(false);
 
@@ -158,10 +166,10 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const refQuantidade = useRef<HTMLInputElement>(null);
   const refUsuario = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    window.api.sistema.infoTerminal().then((info) => setTerminal(info.terminal));
-    window.api.sistema.listarImpressoras().then((lista) => {
-      setImpressorasDisponiveis(lista);
+  const carregarImpressoras = useCallback(async (autoSelecionar: boolean) => {
+    const lista = await window.api.sistema.listarImpressoras();
+    setImpressorasDisponiveis(lista);
+    if (autoSelecionar) {
       const thermal = lista.find((i) =>
         /elgin|pos|bematech|daruma|epson|tmt|tm-|cupom|termica|80mm|58mm/i.test(i.name)
       );
@@ -173,8 +181,50 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       } else if (lista.length > 0) {
         setImpressoraSelecionada(lista[0].name);
       }
-    });
+    }
   }, []);
+
+  useEffect(() => {
+    window.api.sistema.infoTerminal().then((info) => setTerminal(info.terminal));
+    carregarImpressoras(true);
+
+    // Reconsulta o status periodicamente (papel/energia/conexão podem mudar
+    // a qualquer momento) para manter o indicador do topo atualizado sem
+    // exigir que o usuário reinicie o app.
+    const intervalo = setInterval(() => carregarImpressoras(false), 15000);
+    return () => clearInterval(intervalo);
+  }, [carregarImpressoras]);
+
+  const carregarCestasHoje = useCallback(async () => {
+    try {
+      const total = await window.api.sistema.contadorCestasHoje();
+      setCestasHoje(total);
+    } catch {
+      // silencioso: não é crítico o suficiente pra atrapalhar a operação
+    }
+  }, []);
+
+  useEffect(() => {
+    carregarCestasHoje();
+    // Também reconsulta periodicamente: útil em ambiente LAN, onde outros
+    // terminais podem registrar cestas que mudam a contagem em tempo real,
+    // e garante que o contador vire pra 0 sozinho logo após a virada do dia.
+    const intervalo = setInterval(carregarCestasHoje, 30000);
+    return () => clearInterval(intervalo);
+  }, [carregarCestasHoje]);
+
+  const recarregarConfigFilial = useCallback(async () => {
+    try {
+      const config = await window.api.configuracoes.obter();
+      setConfigFilial(config.filial);
+    } catch {
+      // mantém o valor anterior em caso de falha pontual
+    }
+  }, []);
+
+  useEffect(() => {
+    recarregarConfigFilial();
+  }, [recarregarConfigFilial]);
 
 
   // ---------------------------------------------------------------------
@@ -383,12 +433,6 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [itens]
   );
 
-  const trocoCalculado = useMemo(() => {
-    const pago = parseFloat(valorPago.replace(',', '.'));
-    if (isNaN(pago) || pago <= totalGeral) return 0;
-    return Number((pago - totalGeral).toFixed(2));
-  }, [valorPago, totalGeral]);
-
   // ---------------------------------------------------------------------
   // C. Vínculo de usuário (F2) por Nome, ID, CPF ou Telefone
   // ---------------------------------------------------------------------
@@ -433,12 +477,7 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // D + F12: Fechamento da venda -> grava no banco e dispara impressão das vias
   // ---------------------------------------------------------------------
   const fecharVenda = useCallback(
-    async (
-      formaPagtoCustom?: string,
-      valPagoCustom?: number,
-      trocoCustom?: number,
-      nomeImpressoraCustom?: string
-    ) => {
+    async (pagamentos: PagamentoOrcamento[], nomeImpressoraCustom?: string) => {
       setErroFechamento(null);
 
       if (itens.length === 0) {
@@ -448,20 +487,12 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       setFechandoVenda(true);
       try {
-        const pagtoFinal = formaPagtoCustom ?? formaPagamento;
-        const valorPagoNum =
-          valPagoCustom ??
-          (parseFloat(valorPago.replace(',', '.')) || totalGeral);
-        const trocoNum = trocoCustom ?? (valorPagoNum > totalGeral ? valorPagoNum - totalGeral : 0);
-
         const orcamentoCriado = await window.api.orcamentos.criar({
           usuario_id: usuarioSelecionado?.usuario_id ?? null,
           tipo_operacao: modalidade,
           terminal,
           total: totalGeral,
-          forma_pagamento: pagtoFinal,
-          valor_pago: valorPagoNum,
-          troco: trocoNum,
+          pagamentos,
           cliente_nome: modalidade === 'ENTREGA' ? clienteEntregaNome.trim() || null : null,
           cliente_telefone: modalidade === 'ENTREGA' ? clienteEntregaTelefone.trim() || null : null,
           cliente_documento: modalidade === 'ENTREGA' ? clienteEntregaDocumento.trim() || null : null,
@@ -483,14 +514,15 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         );
 
         setUltimoOrcamento(orcamentoCriado);
+        if (modalidade === 'CESTA') {
+          carregarCestasHoje();
+        }
 
         // Limpa o estado para a próxima venda
         setItens([]);
         setUsuarioSelecionado(null);
         setCodigoUsuario('');
         setModalidade('CESTA');
-        setValorPago('');
-        setFormaPagamento('DINHEIRO');
         setClienteEntregaNome('');
         setClienteEntregaTelefone('');
         setClienteEntregaDocumento('');
@@ -509,13 +541,12 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       modalidade,
       terminal,
       totalGeral,
-      formaPagamento,
-      valorPago,
       impressoraSelecionada,
       clienteEntregaNome,
       clienteEntregaTelefone,
       clienteEntregaDocumento,
       clienteEntregaEndereco,
+      carregarCestasHoje,
     ]
   );
 
@@ -614,11 +645,6 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     modalidade,
     setModalidade: alterarModalidade,
-    formaPagamento,
-    setFormaPagamento,
-    valorPago,
-    setValorPago,
-    trocoCalculado,
 
     clienteEntregaNome,
     setClienteEntregaNome,
@@ -631,6 +657,10 @@ export const SalesProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     impressoraSelecionada,
     setImpressoraSelecionada,
+    recarregarImpressoras: () => carregarImpressoras(false),
+    cestasHoje,
+    configFilial,
+    recarregarConfigFilial,
     impressorasDisponiveis,
 
     modalFechamentoAberto,

@@ -9,6 +9,8 @@ import {
   OrcamentoCompleto,
   ItemOrcamento,
   PrecoResolvido,
+  ConfiguracoesApp,
+  PagamentoOrcamento,
 } from './types';
 
 let db: Database.Database;
@@ -88,6 +90,26 @@ export function initDatabase(): Database.Database {
     CREATE INDEX IF NOT EXISTS idx_produtos_barras ON produtos(barras);
     CREATE INDEX IF NOT EXISTS idx_produtos_descricao ON produtos(descricao);
     CREATE INDEX IF NOT EXISTS idx_orcamento_itens_orcamento ON orcamento_itens(orcamento_id);
+
+    -- Pagamentos de UM orçamento, podendo ser divididos em mais de uma
+    -- forma (ex: parte no PIX, parte em dinheiro). Ver criarOrcamento().
+    CREATE TABLE IF NOT EXISTS orcamento_pagamentos (
+      pagamento_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+      orcamento_id     INTEGER NOT NULL,
+      forma_pagamento  TEXT NOT NULL,
+      valor            REAL NOT NULL,
+      FOREIGN KEY (orcamento_id) REFERENCES orcamentos(orcamento_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_orcamento_pagamentos_orcamento ON orcamento_pagamentos(orcamento_id);
+
+    -- Configurações da aplicação (dados da filial, diretórios de importação
+    -- etc.), guardadas como pares chave/valor pra não precisar de migração
+    -- de schema a cada nova configuração adicionada no futuro.
+    CREATE TABLE IF NOT EXISTS configuracoes (
+      chave TEXT PRIMARY KEY,
+      valor TEXT NOT NULL
+    );
   `);
 
   try { db.exec('ALTER TABLE orcamentos ADD COLUMN forma_pagamento TEXT;'); } catch {}
@@ -97,6 +119,10 @@ export function initDatabase(): Database.Database {
   try { db.exec('ALTER TABLE orcamentos ADD COLUMN cliente_telefone TEXT;'); } catch {}
   try { db.exec('ALTER TABLE orcamentos ADD COLUMN cliente_documento TEXT;'); } catch {}
   try { db.exec('ALTER TABLE orcamentos ADD COLUMN cliente_endereco TEXT;'); } catch {}
+  // Número sequencial da cesta NO DIA (reinicia sozinho todo dia, pois é
+  // calculado a partir de date(data_hora) no momento da criação — ver
+  // criarOrcamento(). Guardado na coluna pra ficar fixo no histórico/relatório.
+  try { db.exec('ALTER TABLE orcamentos ADD COLUMN numero_cesta_dia INTEGER;'); } catch {}
 
   seedIfEmpty();
 
@@ -411,7 +437,72 @@ export function pesquisarUsuariosPorNome(termo: string, limite = 15): Usuario[] 
 }
 
 /** Grava o orçamento e seus itens em uma única transação e retorna o registro completo. */
+const FORMAS_PAGAMENTO_VALIDAS = new Set([
+  'DINHEIRO',
+  'CARTAO_DEBITO',
+  'CARTAO_CREDITO',
+  'PIX',
+  'OUTROS',
+]);
+
+/**
+ * Consolida a lista de pagamentos (que pode misturar várias formas — ex:
+ * parte no PIX, parte em dinheiro) e calcula o resumo gravado nas colunas
+ * de compatibilidade de `orcamentos` (forma_pagamento/valor_pago/troco).
+ *
+ * Regra de negócio, validada aqui no servidor (nunca só na tela, pra não
+ * depender de o cliente ter calculado certo):
+ * - Cartão/PIX/Outros: cada um só pode cobrir até o que ainda falta da
+ *   venda — nunca mais que isso. A diferença tem que vir de outra forma.
+ * - Dinheiro: pode ultrapassar o que falta; o excedente vira troco.
+ * - A venda só pode ser fechada quando a soma de tudo (dinheiro aplicado +
+ *   demais formas) cobre o total exato da venda.
+ */
+function consolidarPagamentos(total: number, pagamentos: PagamentoOrcamento[]) {
+  const linhas = pagamentos.filter((p) => p.valor > 0);
+
+  for (const p of linhas) {
+    if (!FORMAS_PAGAMENTO_VALIDAS.has(p.forma_pagamento)) {
+      throw new Error(`Forma de pagamento inválida: "${p.forma_pagamento}".`);
+    }
+  }
+
+  const naoDinheiro = linhas.filter((p) => p.forma_pagamento !== 'DINHEIRO');
+  const dinheiro = linhas.filter((p) => p.forma_pagamento === 'DINHEIRO');
+
+  const somaNaoDinheiro = Number(naoDinheiro.reduce((s, p) => s + p.valor, 0).toFixed(2));
+  const somaDinheiroBruto = Number(dinheiro.reduce((s, p) => s + p.valor, 0).toFixed(2));
+
+  if (somaNaoDinheiro > total + 0.005) {
+    throw new Error(
+      'O valor recebido em cartão/PIX/outros não pode ultrapassar o total da venda.'
+    );
+  }
+
+  const saldoAntesDinheiro = Math.max(0, Number((total - somaNaoDinheiro).toFixed(2)));
+  const dinheiroAplicado = Math.min(somaDinheiroBruto, saldoAntesDinheiro);
+  const troco = Number((somaDinheiroBruto - dinheiroAplicado).toFixed(2));
+  const valorPago = Number((somaNaoDinheiro + somaDinheiroBruto).toFixed(2));
+  const totalCoberto = Number((somaNaoDinheiro + dinheiroAplicado).toFixed(2));
+
+  if (totalCoberto < total - 0.005) {
+    throw new Error(
+      `Pagamento incompleto: faltam R$ ${(total - totalCoberto).toFixed(2)} para cobrir a venda.`
+    );
+  }
+
+  const formaPagamentoResumo =
+    linhas.length === 0 ? null : linhas.length === 1 ? linhas[0].forma_pagamento : 'MULTIPLO';
+
+  return { linhas, formaPagamentoResumo, valorPago, troco };
+}
+
 export function criarOrcamento(input: OrcamentoInput): OrcamentoCompleto {
+  const { linhas, formaPagamentoResumo, valorPago, troco } = consolidarPagamentos(
+    input.total,
+    input.pagamentos ?? []
+  );
+
   const inserirOrcamento = db.prepare(`
     INSERT INTO orcamentos (usuario_id, tipo_operacao, total, terminal, forma_pagamento, valor_pago, troco, cliente_nome, cliente_telefone, cliente_documento, cliente_endereco)
     VALUES (@usuario_id, @tipo_operacao, @total, @terminal, @forma_pagamento, @valor_pago, @troco, @cliente_nome, @cliente_telefone, @cliente_documento, @cliente_endereco)
@@ -424,15 +515,35 @@ export function criarOrcamento(input: OrcamentoInput): OrcamentoCompleto {
       (@orcamento_id, @produto_id, @descricao, @barras, @quantidade, @preco_unitario, @promocional, @subtotal)
   `);
 
+  const inserirPagamento = db.prepare(`
+    INSERT INTO orcamento_pagamentos (orcamento_id, forma_pagamento, valor)
+    VALUES (@orcamento_id, @forma_pagamento, @valor)
+  `);
+
+  // Conta quantas CESTAs já existem no mesmo dia (a mesma data do orçamento
+  // recém-criado) para definir o número sequencial desta cesta. Como o
+  // filtro é por date(data_hora), o número reinicia sozinho todo dia — não
+  // existe estado/contador separado pra "esquecer" de zerar.
+  const contarCestasDoDia = db.prepare(`
+    SELECT COUNT(*) AS c FROM orcamentos
+    WHERE tipo_operacao = 'CESTA' AND date(data_hora) = date(?)
+  `);
+  const atualizarNumeroCesta = db.prepare(
+    'UPDATE orcamentos SET numero_cesta_dia = ? WHERE orcamento_id = ?'
+  );
+  const buscarDataHoraOrcamento = db.prepare(
+    'SELECT data_hora FROM orcamentos WHERE orcamento_id = ?'
+  );
+
   const transacao = db.transaction((dados: OrcamentoInput) => {
     const resultado = inserirOrcamento.run({
       usuario_id: dados.usuario_id,
       tipo_operacao: dados.tipo_operacao,
       total: dados.total,
       terminal: dados.terminal,
-      forma_pagamento: dados.forma_pagamento ?? null,
-      valor_pago: dados.valor_pago ?? 0,
-      troco: dados.troco ?? 0,
+      forma_pagamento: formaPagamentoResumo,
+      valor_pago: valorPago,
+      troco: troco,
       cliente_nome: dados.cliente_nome ?? null,
       cliente_telefone: dados.cliente_telefone ?? null,
       cliente_documento: dados.cliente_documento ?? null,
@@ -454,11 +565,80 @@ export function criarOrcamento(input: OrcamentoInput): OrcamentoCompleto {
       });
     }
 
+    for (const pagamento of linhas) {
+      inserirPagamento.run({
+        orcamento_id: orcamentoId,
+        forma_pagamento: pagamento.forma_pagamento,
+        valor: pagamento.valor,
+      });
+    }
+
+    if (dados.tipo_operacao === 'CESTA') {
+      const { data_hora: dataHoraOrcamento } = buscarDataHoraOrcamento.get(orcamentoId) as {
+        data_hora: string;
+      };
+      const { c: numeroCestaDia } = contarCestasDoDia.get(dataHoraOrcamento) as { c: number };
+      atualizarNumeroCesta.run(numeroCestaDia, orcamentoId);
+    }
+
     return orcamentoId;
   });
 
   const orcamentoId = transacao(input);
   return buscarOrcamentoCompleto(orcamentoId)!;
+}
+
+/**
+ * Quantas CESTAs já foram registradas hoje. Usado pra exibir na tela do PDV
+ * qual será o número da PRÓXIMA cesta, antes mesmo de fechar a venda.
+ * Reinicia sozinho à meia-noite, pois é sempre filtrado pela data atual.
+ */
+export function contarCestasHoje(): number {
+  const { c } = db
+    .prepare(`SELECT COUNT(*) AS c FROM orcamentos WHERE tipo_operacao = 'CESTA' AND date(data_hora) = date('now','localtime')`)
+    .get() as { c: number };
+  return c;
+}
+
+export interface LinhaRelatorioVendas {
+  data: string;
+  vendedorId: number | null;
+  vendedorNome: string;
+  qtdOrcamentos: number;
+  qtdCestas: number;
+  qtdEntregas: number;
+  totalVendido: number;
+}
+
+/**
+ * Relatório de vendas agrupado por dia e por vendedor, no intervalo
+ * [dataInicio, dataFim] (strings 'YYYY-MM-DD', inclusive nos dois lados).
+ */
+export function gerarRelatorioVendasPorDiaVendedor(
+  dataInicio: string,
+  dataFim: string
+): LinhaRelatorioVendas[] {
+  const linhas = db
+    .prepare(
+      `
+      SELECT
+        date(o.data_hora)                          AS data,
+        o.usuario_id                                AS vendedorId,
+        COALESCE(u.nome, 'Nao identificado')        AS vendedorNome,
+        COUNT(*)                                    AS qtdOrcamentos,
+        SUM(CASE WHEN o.tipo_operacao = 'CESTA'   THEN 1 ELSE 0 END) AS qtdCestas,
+        SUM(CASE WHEN o.tipo_operacao = 'ENTREGA' THEN 1 ELSE 0 END) AS qtdEntregas,
+        SUM(o.total)                                AS totalVendido
+      FROM orcamentos o
+      LEFT JOIN usuarios u ON u.usuario_id = o.usuario_id
+      WHERE date(o.data_hora) BETWEEN date(?) AND date(?)
+      GROUP BY date(o.data_hora), o.usuario_id
+      ORDER BY date(o.data_hora) DESC, totalVendido DESC
+      `
+    )
+    .all(dataInicio, dataFim) as LinhaRelatorioVendas[];
+
+  return linhas;
 }
 
 export function buscarOrcamentoCompleto(orcamentoId: number): OrcamentoCompleto | null {
@@ -471,9 +651,15 @@ export function buscarOrcamentoCompleto(orcamentoId: number): OrcamentoCompleto 
     .prepare('SELECT * FROM orcamento_itens WHERE orcamento_id = ? ORDER BY item_id ASC')
     .all(orcamentoId) as ItemOrcamento[];
 
+  const pagamentos = db
+    .prepare(
+      'SELECT forma_pagamento, valor FROM orcamento_pagamentos WHERE orcamento_id = ? ORDER BY pagamento_id ASC'
+    )
+    .all(orcamentoId) as PagamentoOrcamento[];
+
   const usuario = orcamento.usuario_id ? buscarUsuarioPorId(orcamento.usuario_id) : null;
 
-  return { ...orcamento, itens, usuario };
+  return { ...orcamento, itens, pagamentos, usuario };
 }
 
 export function listarUltimosOrcamentos(limite = 50): OrcamentoCompleto[] {
@@ -484,3 +670,52 @@ export function listarUltimosOrcamentos(limite = 50): OrcamentoCompleto[] {
     .map((row) => buscarOrcamentoCompleto(row.orcamento_id))
     .filter((o): o is OrcamentoCompleto => o !== null);
 }
+
+// ---------------------------------------------------------------------
+// Configurações da aplicação (dados da filial)
+// ---------------------------------------------------------------------
+
+/** Valores usados enquanto nada foi salvo ainda em `configuracoes` — os
+ * mesmos que já estavam fixos no código antes desta tela existir, então
+ * quem já usa o app não perde a informação atual do cupom. */
+const CONFIG_FILIAL_PADRAO: ConfiguracoesApp['filial'] = {
+  nome: 'NOVA REDE DROGARIAS',
+  endereco: 'RUA TUNISIA, 42 - BANGU',
+  cnpj: '****',
+  telefone: '**',
+};
+
+export function obterConfiguracoesApp(): ConfiguracoesApp {
+  const linhas = db.prepare('SELECT chave, valor FROM configuracoes').all() as Array<{
+    chave: string;
+    valor: string;
+  }>;
+  const mapa = new Map(linhas.map((l) => [l.chave, l.valor]));
+
+  return {
+    filial: {
+      nome: mapa.get('filial.nome') ?? CONFIG_FILIAL_PADRAO.nome,
+      endereco: mapa.get('filial.endereco') ?? CONFIG_FILIAL_PADRAO.endereco,
+      cnpj: mapa.get('filial.cnpj') ?? CONFIG_FILIAL_PADRAO.cnpj,
+      telefone: mapa.get('filial.telefone') ?? CONFIG_FILIAL_PADRAO.telefone,
+    },
+  };
+}
+
+export function salvarConfiguracoesApp(config: ConfiguracoesApp): ConfiguracoesApp {
+  const upsert = db.prepare(`
+    INSERT INTO configuracoes (chave, valor) VALUES (@chave, @valor)
+    ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor
+  `);
+
+  const transacao = db.transaction((cfg: ConfiguracoesApp) => {
+    upsert.run({ chave: 'filial.nome', valor: cfg.filial.nome });
+    upsert.run({ chave: 'filial.endereco', valor: cfg.filial.endereco });
+    upsert.run({ chave: 'filial.cnpj', valor: cfg.filial.cnpj });
+    upsert.run({ chave: 'filial.telefone', valor: cfg.filial.telefone });
+  });
+
+  transacao(config);
+  return obterConfiguracoesApp();
+}
+

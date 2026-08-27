@@ -2,18 +2,11 @@ import { execFile } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { OrcamentoCompleto, TipoOperacao } from './types';
+import { ConfigFilial, OrcamentoCompleto, TipoOperacao } from './types';
+import { resolverCaminhoScript } from './resourcePaths';
 
 /** Largura útil, em colunas, de uma bobina térmica de 80mm (fonte padrão ~ 38 colunas com margem). */
 const LARGURA_COLUNAS = 38;
-
-/** Nome/identificação da loja impressa no cabeçalho do cupom. Ajuste conforme necessário. */
-const LOJA = {
-  nome: 'NOVA REDE DROGARIAS',
-  endereco: 'RUA TUNISIA, 42 - BANGU',
-  cnpj: '****',
-  telefone: '**',
-};
 
 
 // ---------------------------------------------------------------------------
@@ -72,6 +65,18 @@ function formatarMoeda(valor: number): string {
   return valor.toFixed(2).replace('.', ',');
 }
 
+const ROTULOS_FORMA_PAGAMENTO: Record<string, string> = {
+  DINHEIRO: 'Dinheiro',
+  CARTAO_DEBITO: 'Cartao Debito',
+  CARTAO_CREDITO: 'Cartao Credito',
+  PIX: 'PIX',
+  OUTROS: 'Outros',
+};
+
+function rotuloFormaPagamento(forma: string): string {
+  return ROTULOS_FORMA_PAGAMENTO[forma] ?? forma;
+}
+
 function formatarDataHora(dataIso: string): string {
   const data = new Date(dataIso.replace(' ', 'T'));
   if (isNaN(data.getTime())) return dataIso;
@@ -97,6 +102,9 @@ export interface OpcoesCupom {
   numeroVia: number;
   totalVias: number;
   terminal: string;
+  /** Dados da filial (nome/endereço/CNPJ/telefone), vindos da tela de
+   * Configurações — ver database.ts:obterConfiguracoesApp(). */
+  loja: ConfigFilial;
 }
 
 /**
@@ -108,15 +116,18 @@ export interface OpcoesCupom {
  *  - Rodapé com total, data/hora, terminal e identificação da via
  */
 export function gerarTextoCupom(opcoes: OpcoesCupom): string {
-  const { orcamento, numeroVia, totalVias, terminal } = opcoes;
+  const { orcamento, numeroVia, totalVias, terminal, loja } = opcoes;
   const out: string[] = [];
 
   // Cabeçalho da loja
-  out.push(centralizar(LOJA.nome));
-  out.push(centralizar(LOJA.endereco));
-  out.push(centralizar(`CNPJ: ${LOJA.cnpj}  TEL: ${LOJA.telefone}`));
+  out.push(centralizar(loja.nome));
+  out.push(centralizar(loja.endereco));
+  out.push(centralizar(`CNPJ: ${loja.cnpj}  TEL: ${loja.telefone}`));
   out.push(linha('='));
   out.push(centralizar(`*** OPERACAO: ${orcamento.tipo_operacao} ***`));
+  if (orcamento.tipo_operacao === 'CESTA' && orcamento.numero_cesta_dia) {
+    out.push(centralizar(`CESTA Nº ${orcamento.numero_cesta_dia}`));
+  }
   out.push(linha('='));
 
   // Identificação do Vendedor (usuário)
@@ -166,10 +177,23 @@ export function gerarTextoCupom(opcoes: OpcoesCupom): string {
 
   // Rodapé (Exibe sempre TOTAL, VALOR PAGO e TROCO sem cortes)
   out.push(colunaDupla('TOTAL GERAL:', `R$ ${formatarMoeda(orcamento.total)}`));
-  const formaPagto = orcamento.forma_pagamento ?? 'DINHEIRO';
-  out.push(colunaDupla('FORMA PAGTO:', formaPagto));
-  out.push(colunaDupla('VALOR PAGO:', `R$ ${formatarMoeda(orcamento.valor_pago ?? orcamento.total)}`));
-  out.push(colunaDupla('TROCO:', `R$ ${formatarMoeda(orcamento.troco ?? 0)}`));
+  out.push(linha('-'));
+  if (orcamento.pagamentos && orcamento.pagamentos.length > 0) {
+    out.push('FORMA(S) DE PAGAMENTO:');
+    for (const pagamento of orcamento.pagamentos) {
+      out.push(
+        colunaDupla(rotuloFormaPagamento(pagamento.forma_pagamento), `R$ ${formatarMoeda(pagamento.valor)}`)
+      );
+    }
+  } else {
+    // Compatibilidade com orçamentos antigos, gravados antes da divisão
+    // de pagamento em múltiplas formas.
+    out.push(colunaDupla('FORMA PAGTO:', orcamento.forma_pagamento ?? 'DINHEIRO'));
+    out.push(colunaDupla('VALOR PAGO:', `R$ ${formatarMoeda(orcamento.valor_pago ?? orcamento.total)}`));
+  }
+  if ((orcamento.troco ?? 0) > 0) {
+    out.push(colunaDupla('TROCO:', `R$ ${formatarMoeda(orcamento.troco ?? 0)}`));
+  }
   out.push(linha('='));
   out.push(colunaDupla('Data/Hora:', formatarDataHora(orcamento.data_hora)));
   out.push(colunaDupla('Terminal:', terminal));
@@ -211,13 +235,14 @@ export interface ResultadoImpressao {
 export async function imprimirViasOrcamento(
   orcamento: OrcamentoCompleto,
   terminal: string,
+  loja: ConfigFilial,
   nomeImpressora?: string,
 ): Promise<ResultadoImpressao[]> {
   const totalVias = orcamento.tipo_operacao === 'CESTA' ? 2 : 3;
   const resultados: ResultadoImpressao[] = [];
 
   for (let via = 1; via <= totalVias; via++) {
-    const texto = gerarTextoCupom({ orcamento, numeroVia: via, totalVias, terminal });
+    const texto = gerarTextoCupom({ orcamento, numeroVia: via, totalVias, terminal, loja });
     const bufferVia = montarBufferEscPos(texto);
     try {
       await enviarParaImpressora(bufferVia, nomeImpressora);
@@ -239,14 +264,15 @@ function enviarParaImpressora(buffer: Buffer, nomeImpressora?: string): Promise<
     fs.writeFileSync(arquivoTemp, buffer);
 
     if (process.platform === 'win32') {
-      const scriptCaminhos = [
-        path.join(__dirname, 'print.ps1'),
-        path.join(__dirname, '..', 'electron', 'print.ps1'),
-        path.join(process.cwd(), 'electron', 'print.ps1'),
-        path.join(process.cwd(), 'dist-electron', 'print.ps1'),
-      ];
+      const scriptPs = resolverCaminhoScript('print.ps1');
 
-      const scriptPs = scriptCaminhos.find((p) => fs.existsSync(p));
+      if (!scriptPs) {
+        // Log explícito: melhor falhar ruidosamente do que cair no fallback
+        // de "copy /b ... LPT1" sem ninguém perceber (LPT1 quase nunca existe
+        // em impressoras térmicas modernas via USB, então o fallback também
+        // falha silenciosamente).
+        console.error('[printer] print.ps1 não encontrado em nenhum caminho esperado.');
+      }
 
       if (scriptPs) {
         const printerArg = nomeImpressora?.trim() || '';

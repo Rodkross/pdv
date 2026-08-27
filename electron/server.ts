@@ -9,6 +9,7 @@ import {
   criarOrcamento,
   buscarOrcamentoCompleto,
   resolverPreco,
+  obterConfiguracoesApp,
 } from './database';
 import { imprimirViasOrcamento } from './printer';
 import { OrcamentoInput } from './types';
@@ -74,7 +75,8 @@ export function iniciarServidorLan(): Server {
     if (!orcamento) return res.status(404).json({ erro: 'Orcamento nao encontrado' });
     const terminal = String(req.body?.terminal ?? 'REMOTO');
     const nomeImpressora = req.body?.nomeImpressora as string | undefined;
-    const resultados = await imprimirViasOrcamento(orcamento, terminal, nomeImpressora);
+    const { filial } = obterConfiguracoesApp();
+    const resultados = await imprimirViasOrcamento(orcamento, terminal, filial, nomeImpressora);
     res.json({ resultados });
   });
 

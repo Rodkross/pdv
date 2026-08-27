@@ -1,0 +1,1 @@
+Local do banco: C:\Users\<seu_usuário>\AppData\Roaming\PDV Orcamento Balcao\pdv.db

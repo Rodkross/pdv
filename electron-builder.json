@@ -14,6 +14,14 @@
       "from": "electron/assets",
       "to": "assets",
       "filter": ["**/*"]
+    },
+    {
+      "from": "electron/print.ps1",
+      "to": "print.ps1"
+    },
+    {
+      "from": "electron/printer-status.ps1",
+      "to": "printer-status.ps1"
     }
   ],
   "win": {

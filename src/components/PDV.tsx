@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useSales } from '../context/SalesContext';
 import ReceiptPreview from './ReceiptPreview';
+import { PagamentoOrcamento, FormaPagamento } from '../types';
 
 function formatarMoeda(valor: number): string {
   return valor.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -38,10 +39,6 @@ const PDV: React.FC = () => {
     buscarUsuario,
     modalidade,
     setModalidade,
-    formaPagamento,
-    setFormaPagamento,
-    valorPago,
-    setValorPago,
     clienteEntregaNome,
     setClienteEntregaNome,
     clienteEntregaTelefone,
@@ -53,6 +50,7 @@ const PDV: React.FC = () => {
     impressoraSelecionada,
     setImpressoraSelecionada,
     impressorasDisponiveis,
+    cestasHoje,
     modalFechamentoAberto,
     abrirModalFechamento,
     fecharModalFechamento,
@@ -70,6 +68,9 @@ const PDV: React.FC = () => {
   const [indiceProdutoFocado, setIndiceProdutoFocado] = useState(-1);
   const [indiceUsuarioFocado, setIndiceUsuarioFocado] = useState(-1);
 
+  const refsItensProduto = useRef<Array<HTMLLIElement | null>>([]);
+  const refsItensUsuario = useRef<Array<HTMLLIElement | null>>([]);
+
   useEffect(() => {
     setIndiceProdutoFocado(-1);
   }, [sugestoesProdutos]);
@@ -77,6 +78,19 @@ const PDV: React.FC = () => {
   useEffect(() => {
     setIndiceUsuarioFocado(-1);
   }, [sugestoesUsuarios]);
+
+  // Acompanha a navegação por teclado (setas ↑/↓): rola a listinha de
+  // sugestões pra manter o item destacado sempre visível, do mesmo jeito
+  // que aconteceria clicando/arrastando o scroll manualmente.
+  useEffect(() => {
+    if (indiceProdutoFocado < 0) return;
+    refsItensProduto.current[indiceProdutoFocado]?.scrollIntoView({ block: 'nearest' });
+  }, [indiceProdutoFocado]);
+
+  useEffect(() => {
+    if (indiceUsuarioFocado < 0) return;
+    refsItensUsuario.current[indiceUsuarioFocado]?.scrollIntoView({ block: 'nearest' });
+  }, [indiceUsuarioFocado]);
 
   function aoSubmeterBusca(e: React.FormEvent) {
     e.preventDefault();
@@ -150,22 +164,17 @@ const PDV: React.FC = () => {
     abrirModalFechamento();
   }
 
-  async function confirmarEFechar(
-    formaPagto: string,
-    valPagoNum: number,
-    trocoCalc: number,
-    impressora: string
-  ) {
+  async function confirmarEFechar(pagamentos: PagamentoOrcamento[], impressora: string) {
     fecharModalFechamento();
-    await fecharVenda(formaPagto, valPagoNum, trocoCalc, impressora);
+    await fecharVenda(pagamentos, impressora);
   }
 
   return (
     <div className="flex h-full w-full flex-col gap-3 p-4">
       {/* Barra de status de atalhos */}
       <div className="flex flex-wrap items-center gap-3 rounded-lg bg-pdv-panel px-4 py-2 text-xs text-slate-300">
-        <Atalho tecla="F1" descricao="Buscar Produto" />
         <Atalho tecla="F2" descricao="Buscar Vendedor" />
+        <Atalho tecla="F1" descricao="Buscar Produto" />
         <Atalho tecla="F3" descricao="Modalidade CESTA" ativo={modalidade === 'CESTA'} />
         <Atalho tecla="F4" descricao="Modalidade ENTREGA" ativo={modalidade === 'ENTREGA'} />
         <Atalho tecla="ENTER" descricao="Incluir Item" />
@@ -178,6 +187,80 @@ const PDV: React.FC = () => {
       <div className="grid flex-1 grid-cols-3 gap-3 overflow-hidden">
         {/* Coluna esquerda: bipagem + quantidade + vendedor + modalidade */}
         <div className="col-span-1 flex flex-col gap-3 overflow-y-auto">
+          {/* Busca de Vendedor (Usuário) */}
+          <section className="relative rounded-lg bg-pdv-panel p-4">
+            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
+              Vendedor (Usuário) (F2)
+            </h2>
+            <form onSubmit={aoSubmeterUsuario} className="flex gap-2">
+              <div className="relative flex-1">
+                <input
+                  ref={refUsuario}
+                  value={codigoUsuario}
+                  onChange={(e) => setCodigoUsuario(e.target.value)}
+                  onKeyDown={aoTeclarInputUsuario}
+                  placeholder="Nome, ID ou CPF do Vendedor..."
+                  className="w-full rounded-md border border-pdv-panelLight bg-slate-900 px-3 py-2 text-sm outline-none focus:border-pdv-accent"
+                  autoFocus
+                />
+                {carregandoUsuarios && (
+                  <span className="absolute right-3 top-2.5 text-xs text-slate-400">...</span>
+                )}
+              </div>
+              <button
+                type="submit"
+                className="rounded-md bg-pdv-accent px-4 py-2 text-sm font-semibold hover:bg-blue-700"
+              >
+                Vincular
+              </button>
+            </form>
+
+            {/* Dropdown de sugestões de vendedores */}
+            {sugestoesUsuarios.length > 0 && (
+              <ul className="absolute left-4 right-4 z-30 mt-1 max-h-56 overflow-y-auto rounded-md border border-pdv-panelLight bg-slate-900 shadow-2xl">
+                {sugestoesUsuarios.map((item, index) => (
+                  <li
+                    key={item.usuario_id}
+                    ref={(el) => (refsItensUsuario.current[index] = el)}
+                    onClick={() => selecionarUsuarioDireto(item)}
+                    onMouseEnter={() => setIndiceUsuarioFocado(index)}
+                    className={`cursor-pointer border-b border-slate-800 p-2 text-xs transition ${
+                      index === indiceUsuarioFocado
+                        ? 'bg-pdv-accent text-white'
+                        : 'hover:bg-slate-800 text-slate-200'
+                    }`}
+                  >
+                    <div className="font-semibold">
+                      Vendedor #{item.usuario_id} — {item.nome}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {erroUsuario && <p className="mt-2 text-sm text-red-400">{erroUsuario}</p>}
+
+            {usuarioSelecionado && (
+              <div className="mt-3 flex items-center justify-between rounded-md border border-pdv-panelLight bg-slate-900 p-3 text-sm">
+                <div>
+                  <p className="font-semibold text-slate-100">
+                    Vendedor: #{usuarioSelecionado.usuario_id} — {usuarioSelecionado.nome}
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setCodigoUsuario('');
+                    limparSugestoesUsuarios();
+                  }}
+                  className="ml-2 rounded bg-slate-800 px-2 py-1 text-xs text-slate-400 hover:text-white"
+                  title="Alterar vendedor"
+                >
+                  Alterar
+                </button>
+              </div>
+            )}
+          </section>
+
           {/* Bipagem / busca de produto */}
           <section className="relative rounded-lg bg-pdv-panel p-4">
             <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
@@ -192,7 +275,6 @@ const PDV: React.FC = () => {
                   onKeyDown={aoTeclarInputProduto}
                   placeholder="Código de barras, ID ou iniciais (ex: ARR)..."
                   className="w-full rounded-md border border-pdv-panelLight bg-slate-900 px-3 py-2 text-sm outline-none focus:border-pdv-accent"
-                  autoFocus
                 />
                 {carregandoProdutos && (
                   <span className="absolute right-3 top-2.5 text-xs text-slate-400">...</span>
@@ -212,6 +294,7 @@ const PDV: React.FC = () => {
                 {sugestoesProdutos.map((item, index) => (
                   <li
                     key={item.produto.produto_id}
+                    ref={(el) => (refsItensProduto.current[index] = el)}
                     onClick={() => void selecionarProdutoDireto(item)}
                     onMouseEnter={() => setIndiceProdutoFocado(index)}
                     className={`cursor-pointer border-b border-slate-800 p-2 text-xs transition ${
@@ -299,89 +382,6 @@ const PDV: React.FC = () => {
             )}
           </section>
 
-          {/* Busca de Vendedor (Usuário) */}
-          <section className="relative rounded-lg bg-pdv-panel p-4">
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
-              Vendedor (Usuário) (F2)
-            </h2>
-            <form onSubmit={aoSubmeterUsuario} className="flex gap-2">
-              <div className="relative flex-1">
-                <input
-                  ref={refUsuario}
-                  value={codigoUsuario}
-                  onChange={(e) => setCodigoUsuario(e.target.value)}
-                  onKeyDown={aoTeclarInputUsuario}
-                  placeholder="Nome, ID ou CPF do Vendedor..."
-                  className="w-full rounded-md border border-pdv-panelLight bg-slate-900 px-3 py-2 text-sm outline-none focus:border-pdv-accent"
-                />
-                {carregandoUsuarios && (
-                  <span className="absolute right-3 top-2.5 text-xs text-slate-400">...</span>
-                )}
-              </div>
-              <button
-                type="submit"
-                className="rounded-md bg-pdv-accent px-4 py-2 text-sm font-semibold hover:bg-blue-700"
-              >
-                Vincular
-              </button>
-            </form>
-
-            {/* Dropdown de sugestões de vendedores */}
-            {sugestoesUsuarios.length > 0 && (
-              <ul className="absolute left-4 right-4 z-30 mt-1 max-h-56 overflow-y-auto rounded-md border border-pdv-panelLight bg-slate-900 shadow-2xl">
-                {sugestoesUsuarios.map((item, index) => (
-                  <li
-                    key={item.usuario_id}
-                    onClick={() => selecionarUsuarioDireto(item)}
-                    onMouseEnter={() => setIndiceUsuarioFocado(index)}
-                    className={`cursor-pointer border-b border-slate-800 p-2 text-xs transition ${
-                      index === indiceUsuarioFocado
-                        ? 'bg-pdv-accent text-white'
-                        : 'hover:bg-slate-800 text-slate-200'
-                    }`}
-                  >
-                    <div className="font-semibold">
-                      Vendedor #{item.usuario_id} — {item.nome}
-                    </div>
-                    <div className="text-[11px] opacity-75">
-                      {item.documento ? `CPF: ${item.documento}` : ''}
-                      {item.documento && item.telefone ? ' · ' : ''}
-                      {item.telefone ? `Tel: ${item.telefone}` : ''}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            {erroUsuario && <p className="mt-2 text-sm text-red-400">{erroUsuario}</p>}
-
-            {usuarioSelecionado && (
-              <div className="mt-3 flex items-center justify-between rounded-md border border-pdv-panelLight bg-slate-900 p-3 text-sm">
-                <div>
-                  <p className="font-semibold text-slate-100">
-                    Vendedor: #{usuarioSelecionado.usuario_id} — {usuarioSelecionado.nome}
-                  </p>
-                  {usuarioSelecionado.documento && (
-                    <p className="text-xs text-slate-400">CPF: {usuarioSelecionado.documento}</p>
-                  )}
-                  {usuarioSelecionado.telefone && (
-                    <p className="text-xs text-slate-400">Tel: {usuarioSelecionado.telefone}</p>
-                  )}
-                </div>
-                <button
-                  onClick={() => {
-                    setCodigoUsuario('');
-                    limparSugestoesUsuarios();
-                  }}
-                  className="ml-2 rounded bg-slate-800 px-2 py-1 text-xs text-slate-400 hover:text-white"
-                  title="Alterar vendedor"
-                >
-                  Alterar
-                </button>
-              </div>
-            )}
-          </section>
-
           {/* Modalidade */}
           <section className="rounded-lg bg-pdv-panel p-4">
             <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-400">
@@ -390,7 +390,7 @@ const PDV: React.FC = () => {
             <div className="flex gap-2">
               <button
                 onClick={() => setModalidade('CESTA')}
-                className={`flex-1 rounded-md py-3 text-sm font-semibold transition ${
+                className={`relative flex-1 rounded-md py-3 text-sm font-semibold transition ${
                   modalidade === 'CESTA'
                     ? 'bg-pdv-accent text-white'
                     : 'bg-pdv-panelLight text-slate-300 hover:bg-slate-600'
@@ -398,6 +398,12 @@ const PDV: React.FC = () => {
               >
                 CESTA (F3)
                 <span className="block text-xs font-normal opacity-80">2 vias</span>
+                <span
+                  className="absolute -top-2 -right-2 rounded-full bg-pdv-accent2 px-2 py-0.5 text-[10px] font-bold text-white shadow"
+                  title="Número da próxima cesta hoje (reinicia à meia-noite)"
+                >
+                  Próx. Nº {cestasHoje + 1}
+                </span>
               </button>
               <button
                 onClick={() => setModalidade('ENTREGA')}
@@ -541,8 +547,6 @@ const PDV: React.FC = () => {
           totalGeral={totalGeral}
           modalidade={modalidade}
           quantidadeItens={itens.length}
-          formaPagamentoInicial={formaPagamento}
-          valorPagoInicial={valorPago}
           impressoraInicial={impressoraSelecionada}
           impressorasDisponiveis={impressorasDisponiveis}
           onConfirmar={confirmarEFechar}
@@ -572,50 +576,90 @@ const Atalho: React.FC<{ tecla: string; descricao: string; ativo?: boolean }> = 
   </span>
 );
 
+/** Rótulos e ordem de exibição das formas de pagamento na grade. */
+const FORMAS_PAGAMENTO: Array<{ forma: FormaPagamento; label: string }> = [
+  { forma: 'DINHEIRO', label: 'Dinheiro' },
+  { forma: 'CARTAO_DEBITO', label: 'Cartão de Débito' },
+  { forma: 'CARTAO_CREDITO', label: 'Cartão de Crédito' },
+  { forma: 'PIX', label: 'PIX' },
+  { forma: 'OUTROS', label: 'Outros' },
+];
+
+function paraNumero(texto: string): number {
+  const n = parseFloat(texto.replace(',', '.'));
+  return isNaN(n) || n < 0 ? 0 : n;
+}
+
 const ModalConfirmacao: React.FC<{
   totalGeral: number;
   modalidade: string;
   quantidadeItens: number;
-  formaPagamentoInicial: string;
-  valorPagoInicial: string;
   impressoraInicial: string;
   impressorasDisponiveis: Array<{ name: string; isDefault?: boolean }>;
-  onConfirmar: (formaPagto: string, valorPago: number, troco: number, impressora: string) => void;
+  onConfirmar: (pagamentos: PagamentoOrcamento[], impressora: string) => void;
   onCancelar: () => void;
 }> = ({
   totalGeral,
   modalidade,
   quantidadeItens,
-  formaPagamentoInicial,
-  valorPagoInicial,
   impressoraInicial,
   impressorasDisponiveis,
   onConfirmar,
   onCancelar,
 }) => {
-  const [formaPagto, setFormaPagto] = useState(formaPagamentoInicial || 'DINHEIRO');
-  const [valorEntregueStr, setValorEntregueStr] = useState(valorPagoInicial || String(totalGeral));
+  // Valores digitados por forma de pagamento, todos começando zerados.
+  const [valores, setValores] = useState<Record<FormaPagamento, string>>({
+    DINHEIRO: '',
+    CARTAO_DEBITO: '',
+    CARTAO_CREDITO: '',
+    PIX: '',
+    OUTROS: '',
+  });
   const [impressora, setImpressora] = useState(impressoraInicial || '');
 
-  const valorEntregueNum = parseFloat(valorEntregueStr.replace(',', '.'));
-  const trocoCalculado =
-    !isNaN(valorEntregueNum) && valorEntregueNum > totalGeral
-      ? Number((valorEntregueNum - totalGeral).toFixed(2))
-      : 0;
+  function atualizarValor(forma: FormaPagamento, texto: string) {
+    setValores((prev) => ({ ...prev, [forma]: texto }));
+  }
 
-  const valorInsuficiente =
-    formaPagto === 'DINHEIRO' && (isNaN(valorEntregueNum) || valorEntregueNum < totalGeral);
+  // --- Cálculo da "baixa" em tempo real, a cada valor digitado ---
+  const valorDinheiro = paraNumero(valores.DINHEIRO);
+  const formasNaoDinheiro: FormaPagamento[] = ['CARTAO_DEBITO', 'CARTAO_CREDITO', 'PIX', 'OUTROS'];
+  const somaNaoDinheiro = formasNaoDinheiro.reduce((soma, f) => soma + paraNumero(valores[f]), 0);
+
+  // Cartão/PIX/Outros nunca podem, juntos, passar do valor da venda —
+  // se algum ultrapassar, a diferença precisa vir de outra forma.
+  const excedeuNaoDinheiro = somaNaoDinheiro > totalGeral + 0.005;
+
+  // Quanto ainda falta antes de considerar o dinheiro digitado.
+  const saldoAntesDinheiro = Math.max(0, Number((totalGeral - somaNaoDinheiro).toFixed(2)));
+  // Dinheiro pode ultrapassar o saldo — o excedente vira troco.
+  const dinheiroAplicado = Math.min(valorDinheiro, saldoAntesDinheiro);
+  const troco = Math.max(0, Number((valorDinheiro - saldoAntesDinheiro).toFixed(2)));
+
+  const totalCoberto = Number((somaNaoDinheiro + dinheiroAplicado).toFixed(2));
+  const saldoRestante = Math.max(0, Number((totalGeral - totalCoberto).toFixed(2)));
+
+  const podeFinalizar = saldoRestante <= 0.005 && !excedeuNaoDinheiro;
+
+  function completarComDinheiro() {
+    atualizarValor('DINHEIRO', String(saldoAntesDinheiro).replace('.', ','));
+  }
 
   function submeterConfirmacao(e: React.FormEvent) {
     e.preventDefault();
-    if (valorInsuficiente) return;
-    const finalPago = isNaN(valorEntregueNum) ? totalGeral : valorEntregueNum;
-    onConfirmar(formaPagto, finalPago, trocoCalculado, impressora);
+    if (!podeFinalizar) return;
+
+    const pagamentos: PagamentoOrcamento[] = FORMAS_PAGAMENTO.map(({ forma }) => ({
+      forma_pagamento: forma,
+      valor: paraNumero(valores[forma]),
+    })).filter((p) => p.valor > 0);
+
+    onConfirmar(pagamentos, impressora);
   }
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4">
-      <div className="w-full max-w-md rounded-lg bg-pdv-panel p-6 shadow-2xl border border-pdv-panelLight">
+      <div className="w-full max-w-md rounded-lg border border-pdv-panelLight bg-pdv-panel p-6 shadow-2xl">
         <h3 className="mb-2 text-lg font-bold text-white">Confirmar Fechamento de Venda</h3>
         <p className="mb-4 text-xs text-slate-300">
           {quantidadeItens} item(ns) · Modalidade <strong>{modalidade}</strong> · Impressão de{' '}
@@ -623,65 +667,113 @@ const ModalConfirmacao: React.FC<{
         </p>
 
         <form onSubmit={submeterConfirmacao} className="space-y-4">
-          {/* Forma de pagamento */}
-          <div>
-            <label className="mb-1 block text-xs font-semibold uppercase text-slate-300">
-              Forma de Pagamento
-            </label>
-            <select
-              value={formaPagto}
-              onChange={(e) => setFormaPagto(e.target.value)}
-              className="w-full rounded-md border border-pdv-panelLight bg-slate-900 px-3 py-2 text-sm text-white outline-none focus:border-pdv-accent"
-            >
-              <option value="DINHEIRO">Dinheiro</option>
-              <option value="CARTAO_DEBITO">Cartão de Débito</option>
-              <option value="CARTAO_CREDITO">Cartão de Crédito</option>
-              <option value="PIX">PIX</option>
-              <option value="OUTROS">Outros</option>
-            </select>
+          {/* Valor da venda */}
+          <div className="flex items-center justify-between rounded-md border border-slate-700 bg-slate-900/90 px-4 py-3">
+            <span className="text-sm font-semibold text-slate-300">Valor da Venda</span>
+            <span className="text-2xl font-extrabold text-white">{formatarMoeda(totalGeral)}</span>
           </div>
 
-          {/* Campo de valor entregue e troco se for DINHEIRO ou ENTREGA */}
-          {(formaPagto === 'DINHEIRO' || modalidade === 'ENTREGA') && (
-            <div className="rounded-md border border-slate-700 bg-slate-900/90 p-3 space-y-2">
-              <div className="flex items-center justify-between text-xs text-slate-300">
-                <span>Valor Total da Venda:</span>
-                <span className="text-base font-bold text-white">{formatarMoeda(totalGeral)}</span>
-              </div>
+          {/* Grade de formas de pagamento (linhas compactas, como uma tabela) */}
+          <div>
+            <label className="mb-2 block text-xs font-semibold uppercase text-slate-300">
+              Formas de Pagamento
+            </label>
+            <div className="overflow-hidden rounded-md border border-pdv-panelLight">
+              {FORMAS_PAGAMENTO.map(({ forma, label }, index) => {
+                const valorCampo = paraNumero(valores[forma]);
+                const ehDinheiro = forma === 'DINHEIRO';
+                // Máximo permitido pra este campo específico, considerando
+                // só as OUTRAS formas não-dinheiro já preenchidas.
+                const maxPermitido = ehDinheiro
+                  ? null
+                  : Math.max(0, Number((totalGeral - (somaNaoDinheiro - valorCampo)).toFixed(2)));
+                const excedeuEsteCampo =
+                  !ehDinheiro && maxPermitido !== null && valorCampo > maxPermitido + 0.005;
 
-              <div>
-                <label className="mb-1 block text-xs font-semibold text-slate-300">
-                  Valor Entregue pelo Cliente (R$)
-                </label>
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={valorEntregueStr}
-                  onChange={(e) => setValorEntregueStr(e.target.value)}
-                  placeholder={String(totalGeral)}
-                  className="w-full rounded-md border border-pdv-panelLight bg-slate-950 px-3 py-2 text-base font-bold text-white outline-none focus:border-pdv-accent2"
-                  autoFocus
-                />
-              </div>
+                return (
+                  <div
+                    key={forma}
+                    className={`flex items-center justify-between gap-2 px-3 py-2 ${
+                      index % 2 === 0 ? 'bg-slate-800/60' : 'bg-slate-900'
+                    } ${excedeuEsteCampo ? 'ring-1 ring-inset ring-red-500' : ''}`}
+                  >
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className="truncate text-xs font-semibold uppercase text-slate-200">
+                        {label}
+                      </span>
+                      {ehDinheiro && saldoAntesDinheiro > 0 && (
+                        <button
+                          type="button"
+                          onClick={completarComDinheiro}
+                          className="shrink-0 text-[10px] font-semibold text-pdv-accent2 underline underline-offset-2 hover:text-green-400"
+                          title="Preencher com o valor que falta"
+                        >
+                          completar
+                        </button>
+                      )}
+                      {excedeuEsteCampo && maxPermitido !== null && (
+                        <span className="shrink-0 text-[10px] font-semibold text-red-400">
+                          máx {formatarMoeda(maxPermitido)}
+                        </span>
+                      )}
+                      {ehDinheiro && troco > 0 && (
+                        <span className="shrink-0 text-[10px] font-bold text-pdv-accent2">
+                          troco {formatarMoeda(troco)}
+                        </span>
+                      )}
+                    </div>
 
-              <div className="flex items-center justify-between pt-1">
-                <span className="text-xs font-semibold uppercase text-slate-300">Troco a Devolver:</span>
-                <span
-                  className={`text-xl font-extrabold ${
-                    valorInsuficiente ? 'text-red-400' : 'text-pdv-accent2'
-                  }`}
-                >
-                  {formatarMoeda(trocoCalculado)}
-                </span>
-              </div>
-
-              {valorInsuficiente && (
-                <p className="text-[11px] font-semibold text-red-400">
-                  O valor entregue é inferior ao total (falta R${' '}
-                  {formatarMoeda(totalGeral - (isNaN(valorEntregueNum) ? 0 : valorEntregueNum))})
-                </p>
-              )}
+                    <div
+                      className={`flex shrink-0 items-center gap-1 rounded-md border bg-slate-950 px-2 ${
+                        excedeuEsteCampo
+                          ? 'border-red-500'
+                          : 'border-pdv-panelLight focus-within:border-pdv-accent'
+                      }`}
+                    >
+                      <span className="text-xs text-slate-500">R$</span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={valores[forma]}
+                        onChange={(e) => atualizarValor(forma, e.target.value)}
+                        placeholder="0,00"
+                        autoFocus={ehDinheiro}
+                        className="w-24 bg-transparent py-1.5 text-right text-sm font-bold text-white outline-none"
+                      />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
+          </div>
+
+          {/* Status da baixa em tempo real */}
+          <div className="flex items-center justify-between rounded-md border border-slate-700 bg-slate-900/90 px-4 py-3">
+            <span className="text-xs font-semibold uppercase text-slate-300">
+              {saldoRestante > 0.005 ? 'Falta Receber' : troco > 0.005 ? 'Troco a Devolver' : 'Situação'}
+            </span>
+            <span
+              className={`text-xl font-extrabold ${
+                saldoRestante > 0.005
+                  ? 'text-red-400'
+                  : troco > 0.005
+                    ? 'text-pdv-accent2'
+                    : 'text-pdv-accent2'
+              }`}
+            >
+              {saldoRestante > 0.005
+                ? formatarMoeda(saldoRestante)
+                : troco > 0.005
+                  ? formatarMoeda(troco)
+                  : 'Pagamento completo'}
+            </span>
+          </div>
+
+          {excedeuNaoDinheiro && (
+            <p className="text-[11px] font-semibold text-red-400">
+              O valor em cartão/PIX/outros não pode ultrapassar o total da venda. Ajuste os
+              campos destacados em vermelho.
+            </p>
           )}
 
           {/* Seleção de Impressora */}
@@ -707,13 +799,13 @@ const ModalConfirmacao: React.FC<{
             <button
               type="button"
               onClick={onCancelar}
-              className="rounded-md bg-pdv-panelLight px-4 py-2 text-sm hover:bg-slate-600 text-slate-200"
+              className="rounded-md bg-pdv-panelLight px-4 py-2 text-sm text-slate-200 hover:bg-slate-600"
             >
               Cancelar
             </button>
             <button
               type="submit"
-              disabled={valorInsuficiente}
+              disabled={!podeFinalizar}
               className="rounded-md bg-pdv-accent2 px-5 py-2 text-sm font-bold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-40"
             >
               Confirmar e Imprimir

@@ -19,3 +19,25 @@ html, body, #root {
   background-color: #334155;
   border-radius: 4px;
 }
+
+/* Impressão / "Salvar como PDF": esconde tudo, exceto o relatório marcado
+   com .relatorio-imprimivel, que passa a ocupar a página inteira. Técnica
+   padrão pra imprimir só uma parte da tela em apps Electron/React. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .relatorio-imprimivel,
+  .relatorio-imprimivel * {
+    visibility: visible;
+  }
+  .relatorio-imprimivel {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  .no-imprimir {
+    display: none !important;
+  }
+}

@@ -47,11 +47,43 @@ no arquivo `pdv.db` salvo em `app.getPath('userData')`:
 
 - **produtos**: `produto_id, descricao, barras, preco_cmp, preco_vnd, preco_promocao, data_fim_promocao, estoque`
 - **usuarios**: `usuario_id, nome, documento, telefone, endereco`
-- **orcamentos**: `orcamento_id, usuario_id, tipo_operacao (CESTA|ENTREGA), total, terminal, data_hora`
+- **orcamentos**: `orcamento_id, usuario_id, tipo_operacao (CESTA|ENTREGA), total, terminal, data_hora, numero_cesta_dia`
 - **orcamento_itens**: `item_id, orcamento_id, produto_id, descricao, barras, quantidade, preco_unitario, promocional, subtotal`
 
 Na primeira execução, se as tabelas estiverem vazias, alguns produtos e
 usuários de demonstração são inseridos automaticamente (`seedIfEmpty`).
+
+### Numeração diária de cestas
+
+Toda venda com `tipo_operacao = 'CESTA'` recebe um `numero_cesta_dia`
+sequencial, calculado a partir de `COUNT(*) ... WHERE date(data_hora) =
+date(hoje)` no momento da criação. Como o cálculo é sempre filtrado pela
+data atual, o número **reinicia sozinho todo dia**, sem necessidade de
+nenhum job de reset. Aparece no cupom impresso, na pré-visualização e como
+badge ("Próx. Nº X") no botão CESTA da tela do PDV.
+
+### Relatório de vendas por dia / vendedor
+
+Acessível pelo botão "Relatório de Vendas" no topo da aplicação. Permite
+escolher um período (`dataInicio`/`dataFim`), exibe o total vendido e a
+quantidade de cestas/entregas agrupados por dia e por vendedor, e oferece
+impressão/"Salvar como PDF" via `window.print()` nativo do Electron.
+
+### Configurações (ícone de engrenagem, canto superior direito)
+
+Tela dedicada com:
+- **Dados da Filial**: nome, endereço, CNPJ e telefone impressos no
+  cabeçalho do cupom (antes eram fixos no código, em `printer.ts` e
+  `cupomFormatter.ts` — agora ficam gravados na tabela `configuracoes`
+  do banco, editáveis pela interface). CNPJ e telefone têm máscara de
+  formatação aplicada automaticamente enquanto digita.
+- **Importar Planilhas**: botões "Importar Produtos" e "Importar
+  Vendedores" (migrados do antigo painel fixo no topo do app), que abrem
+  o seletor de arquivo do Windows normalmente.
+
+Tudo é persistido em `configuracoes (chave TEXT PRIMARY KEY, valor TEXT)`
+como pares chave/valor, o que evita nova migração de schema a cada
+configuração adicionada no futuro.
 
 ### Regra de preço promocional
 

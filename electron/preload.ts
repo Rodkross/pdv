@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { OrcamentoInput } from './types';
+import { OrcamentoInput, ConfiguracoesApp } from './types';
 
 const api = {
   produtos: {
@@ -20,10 +20,19 @@ const api = {
   sistema: {
     infoTerminal: () => ipcRenderer.invoke('sistema:infoTerminal'),
     listarImpressoras: () => ipcRenderer.invoke('sistema:listarImpressoras'),
+    contadorCestasHoje: () => ipcRenderer.invoke('sistema:contadorCestasHoje'),
   },
   importacao: {
     produtos: () => ipcRenderer.invoke('importacao:produtos'),
     usuarios: () => ipcRenderer.invoke('importacao:usuarios'),
+  },
+  relatorios: {
+    vendasPorDiaVendedor: (dataInicio: string, dataFim: string) =>
+      ipcRenderer.invoke('relatorios:vendasPorDiaVendedor', dataInicio, dataFim),
+  },
+  configuracoes: {
+    obter: () => ipcRenderer.invoke('configuracoes:obter'),
+    salvar: (config: ConfiguracoesApp) => ipcRenderer.invoke('configuracoes:salvar', config),
   },
 };
 

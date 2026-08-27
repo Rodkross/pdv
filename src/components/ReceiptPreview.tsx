@@ -10,7 +10,8 @@ interface ReceiptPreviewProps {
 }
 
 const ReceiptPreview: React.FC<ReceiptPreviewProps> = ({ orcamento, terminal, onFechar }) => {
-  const { impressorasDisponiveis, impressoraSelecionada, setImpressoraSelecionada } = useSales();
+  const { impressorasDisponiveis, impressoraSelecionada, setImpressoraSelecionada, configFilial } =
+    useSales();
   const totalVias = totalViasPorModalidade(orcamento.tipo_operacao);
   const [viaAtiva, setViaAtiva] = useState(1);
   const [reimprimindo, setReimprimindo] = useState(false);
@@ -19,10 +20,10 @@ const ReceiptPreview: React.FC<ReceiptPreviewProps> = ({ orcamento, terminal, on
   const textoVias = useMemo(() => {
     const vias: string[] = [];
     for (let via = 1; via <= totalVias; via++) {
-      vias.push(gerarTextoCupom({ orcamento, numeroVia: via, totalVias, terminal }));
+      vias.push(gerarTextoCupom({ orcamento, numeroVia: via, totalVias, terminal, loja: configFilial }));
     }
     return vias;
-  }, [orcamento, totalVias, terminal]);
+  }, [orcamento, totalVias, terminal, configFilial]);
 
   async function reimprimir() {
     setReimprimindo(true);
@@ -47,6 +48,9 @@ const ReceiptPreview: React.FC<ReceiptPreviewProps> = ({ orcamento, terminal, on
           <div>
             <h3 className="text-base font-bold">
               Venda #{orcamento.orcamento_id} concluída — {orcamento.tipo_operacao}
+              {orcamento.tipo_operacao === 'CESTA' && orcamento.numero_cesta_dia
+                ? ` (Nº ${orcamento.numero_cesta_dia} do dia)`
+                : ''}
             </h3>
             <p className="text-xs text-slate-400">
               {totalVias} via(s) impressa(s) / pré-visualização do cupom
